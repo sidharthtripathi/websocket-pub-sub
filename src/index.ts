@@ -15,6 +15,8 @@ pubClient.on("error", (err) => console.log("Redis Client Error", err));
 subClient.on("error", (err) => console.log("Redis Client Error", err));
 dotenv.config();
 const msgSchema = z.object({
+  id: z.string(),
+  createdAt: z.string(),
   to: z.string(),
   msg: z.string(),
   conversationId: z.string(),
@@ -27,6 +29,7 @@ const socketsConnected = new Map<string, Socket>();
 const server = createServer();
 server.on("upgrade", async (req, socket, head) => {
   if (req.headers.origin !== "http://localhost:3000") socket.end();
+
   const cookies = parseCookies(req);
 
   const token = cookies.token;
@@ -52,13 +55,17 @@ wss.on("connection", async (socket: Socket, req) => {
   socket.id = p.id as string;
   socket.username = p.username as string;
   socketsConnected.set(socket.id, socket);
-
+  console.log(p.username, "connected");
   socket.onclose = (ev) => {
+    console.log(p.username, "gone !");
     socketsConnected.delete(socket.id);
   };
+
   socket.onmessage = async (e) => {
     try {
-      const { msg, to, conversationId } = msgSchema.parse(JSON.parse(e.data));
+      const { msg, to, conversationId, id, createdAt } = msgSchema.parse(
+        JSON.parse(e.data)
+      );
       const isValidMsg = await redisDb.smIsMember(
         `conversations:${conversationId}`,
         [to, socket.id]
@@ -67,14 +74,31 @@ wss.on("connection", async (socket: Socket, req) => {
       if (socketsConnected.has(to)) {
         socketsConnected
           .get(to)
-          ?.send(JSON.stringify({ msg, from: socket.id, conversationId }));
+          ?.send(
+            JSON.stringify({
+              msg,
+              from: socket.id,
+              conversationId,
+              id,
+              createdAt,
+            })
+          );
       } else
         pubClient.publish(
           "message",
-          JSON.stringify({ msg, to, from: socket.id, conversationId })
+          JSON.stringify({
+            msg,
+            to,
+            from: socket.id,
+            conversationId,
+            id,
+            createdAt,
+          })
         );
       await db.message.create({
         data: {
+          id,
+          createdAt,
           content: msg,
           senderId: socket.id,
           conversationId: conversationId,
@@ -90,16 +114,20 @@ async function main(port: number) {
   await subClient.connect();
   subClient.subscribe("message", async (data) => {
     try {
-      const { msg, to, from, conversationId } = JSON.parse(data) as {
+      const { msg, to, from, conversationId, id, createdAt } = JSON.parse(
+        data
+      ) as {
         msg: string;
         to: string;
         from: string;
         conversationId: string;
+        id: string;
+        createdAt: string;
       };
 
       socketsConnected
         .get(to)
-        ?.send(JSON.stringify({ msg, from, conversationId }));
+        ?.send(JSON.stringify({ msg, from, conversationId, id, createdAt }));
     } catch (error) {
       console.log(error);
     }
